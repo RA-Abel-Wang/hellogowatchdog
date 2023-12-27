@@ -8,15 +8,38 @@ import (
 )
 
 func worker() {
+	heartbeat := make(chan time.Time)
+	defer close(heartbeat)
+
+	restartChan := make(chan struct{})
+	defer close(restartChan)
+
+	go watchdog(restartChan, heartbeat)
+
+	heartbeat_freq := 12 * time.Second
+	timer := time.NewTimer(heartbeat_freq)
+
 	for {
-		fmt.Printf("Hello from worker at %v\n", time.Now())
-		time.Sleep(20 * time.Second)
+		select {
+		case <-timer.C:
+			fmt.Printf("10 seconds elapsed, sending heartbeat at %v\n", time.Now())
+			heartbeat <- time.Now()
+			timer.Reset(heartbeat_freq)
+		case <-restartChan:
+			fmt.Printf("Worker is restarting at %v\n", time.Now())
+			return
+		default:
+			pid := os.Getpid()
+			fmt.Printf("Doing some work at %v with pid %d\n", time.Now(), pid)
+			time.Sleep(1 * time.Second)
+		}
+
 	}
 
 }
 
-func watchdog(process *os.Process, restartChan chan struct{}, heartbeat chan time.Time) {
-	timeout := 30 * time.Second
+func watchdog(restartChan chan struct{}, heartbeat chan time.Time) {
+	timeout := 10 * time.Second
 	timer := time.NewTimer(timeout)
 
 	for {
@@ -26,11 +49,11 @@ func watchdog(process *os.Process, restartChan chan struct{}, heartbeat chan tim
 			timer.Reset(timeout)
 		case <-timer.C:
 			fmt.Println("Process is not alive, restarting")
-			process.Kill()
 			filepath := "dead.txt"
 			_, err := os.Stat(filepath)
 			if os.IsNotExist(err) {
-				break
+				restartChan <- struct{}{}
+				return
 			}
 
 			// Spawn a new instance of the worker process
@@ -38,41 +61,21 @@ func watchdog(process *os.Process, restartChan chan struct{}, heartbeat chan tim
 			newProcess.Stdout = os.Stdout
 			newProcess.Stderr = os.Stderr
 			newProcess.Start()
-
 			// Notify the watchdog about the new process
 			restartChan <- struct{}{}
-			process = newProcess.Process
-
 		}
 
 	}
 }
 
 func main() {
-
 	if len(os.Args) > 1 && os.Args[1] == "worker" {
-		go worker()
+		worker()
 	}
-
-	restartChan := make(chan struct{})
-	defer close(restartChan)
-
 	// start the initial worker process
 	cmd := exec.Command(os.Args[0], "worker")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Start()
 
-	heartbeat := make(chan time.Time)
-	defer close(heartbeat)
-	go func() {
-		for i := 0; i < 3; i++ {
-			heartbeat <- time.Now()
-			time.Sleep(5 * time.Second)
-		}
-	}()
-
-	go watchdog(cmd.Process, restartChan, heartbeat)
-	<-restartChan
-	cmd.Wait()
 }
